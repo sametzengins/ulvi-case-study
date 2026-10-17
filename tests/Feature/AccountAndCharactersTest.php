@@ -3,6 +3,7 @@
 use App\Enums\LedgerEntryType;
 use App\Models\LedgerEntry;
 use App\Models\User;
+use Database\Seeders\CharacterSeeder;
 
 describe('accounts', function () {
     it('registers a user with a wallet and the sign-up tokens, and returns a working token', function () {
@@ -32,5 +33,36 @@ describe('accounts', function () {
         $this->postJson('/api/v1/auth/login', ['email' => 'kai@example.com', 'password' => 'nope'])
             ->assertStatus(401)
             ->assertJsonPath('code', 'invalid_credentials');
+    });
+});
+
+describe('characters', function () {
+    beforeEach(fn () => $this->seed(CharacterSeeder::class));
+
+    it('lists the characters', function () {
+        $this->actingAs(User::factory()->create())->getJson('/api/v1/characters')
+            ->assertOk()
+            ->assertJsonCount(4, 'data')
+            ->assertJsonPath('data.0.slug', 'sera');
+    });
+
+    it('starts a conversation with a character that exists', function () {
+        $user = User::factory()->create();
+
+        $this->actingAs($user)->postJson('/api/v1/conversations', ['character' => 'mira'])
+            ->assertCreated()
+            ->assertJsonPath('data.character.slug', 'mira');
+
+        $this->actingAs($user)->postJson('/api/v1/conversations', ['character' => 'nobody'])
+            ->assertStatus(422)
+            ->assertJsonPath('code', 'validation_failed');
+    });
+
+    it('does not show one user\'s messages to another', function () {
+        $conversation = conversationFor(User::factory()->create(), 'mira');
+
+        $this->actingAs(User::factory()->create())->getJson("/api/v1/conversations/{$conversation->id}/messages")
+            ->assertStatus(404)
+            ->assertJsonPath('code', 'not_found');
     });
 });
