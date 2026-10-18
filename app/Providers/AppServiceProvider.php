@@ -3,6 +3,9 @@
 namespace App\Providers;
 
 use Anthropic\Client as AnthropicClient;
+use App\Billing\FakeGateway;
+use App\Billing\PaymentGateway;
+use App\Billing\StripeGateway;
 use App\Conversations\AnthropicReplyGenerator;
 use App\Conversations\FakeReplyGenerator;
 use App\Conversations\ReplyGenerator;
@@ -12,6 +15,7 @@ use Illuminate\Foundation\DevCommands;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\RateLimiter;
 use Illuminate\Support\ServiceProvider;
+use Stripe\StripeClient;
 
 class AppServiceProvider extends ServiceProvider
 {
@@ -33,6 +37,12 @@ class AppServiceProvider extends ServiceProvider
                 (string) $anthropic['model'],
                 (int) config('ulvi.messages.max_output_tokens'),
             );
+        });
+
+        $this->app->singleton(PaymentGateway::class, function () {
+            return config('ulvi.payment_gateway') === 'stripe'
+                ? new StripeGateway(new StripeClient((string) config('ulvi.stripe.secret')))
+                : new FakeGateway;
         });
     }
 

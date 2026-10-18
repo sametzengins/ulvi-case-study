@@ -7,3 +7,26 @@
     --font-sans: 'Instrument Sans', ui-sans-serif, system-ui, sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji',
         'Segoe UI Symbol', 'Noto Color Emoji';
 }
+
+/* The look of Laravel's default welcome page, for the demo pages. */
+@layer components {
+    .card {
+        @apply rounded-lg bg-white p-6 shadow-[inset_0px_0px_0px_1px_rgba(26,26,0,0.16)] dark:bg-[#161615] dark:shadow-[inset_0px_0px_0px_1px_#fffaed2d];
+    }
+
+    .btn {
+        @apply inline-block cursor-pointer rounded-sm border border-[#19140035] px-5 py-1.5 leading-normal hover:border-[#1915014a] disabled:cursor-not-allowed disabled:opacity-50 dark:border-[#3E3E3A] dark:hover:border-[#62605b];
+    }
+
+    .btn-primary {
+        @apply inline-block cursor-pointer rounded-sm border border-black bg-[#1b1b18] px-5 py-1.5 leading-normal text-white hover:bg-black disabled:cursor-not-allowed disabled:opacity-50 dark:border-[#eeeeec] dark:bg-[#eeeeec] dark:text-[#1C1C1A] dark:hover:bg-white;
+    }
+
+    .input {
+        @apply rounded-sm border border-[#19140035] bg-transparent px-3 py-1.5 dark:border-[#3E3E3A];
+    }
+
+    .muted {
+        @apply text-[#706f6c] dark:text-[#A1A09A];
+    }
+}

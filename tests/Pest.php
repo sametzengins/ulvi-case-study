@@ -1,5 +1,7 @@
 <?php
 
+use App\Billing\StripeEvents;
+use App\Billing\StripeSignature;
 use App\Enums\LedgerEntryType;
 use App\Enums\MessageRole;
 use App\Enums\MessageStatus;
@@ -10,6 +12,7 @@ use App\Models\User;
 use App\Wallet\TokenWallet;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
+use Illuminate\Testing\TestResponse;
 use Tests\TestCase;
 
 pest()->extend(TestCase::class)
@@ -64,4 +67,30 @@ function pendingMessage(User $user, string $content = 'Hello', ?Conversation $co
 function balance(User $user): int
 {
     return (int) $user->wallet()->value('balance');
+}
+
+/**
+ * POST a Stripe event to the webhook endpoint, signed the way Stripe signs it.
+ *
+ * @param  array<string, mixed>  $event
+ */
+function deliverStripeEvent(array $event, ?int $timestamp = null, ?string $secret = null): TestResponse
+{
+    $payload = json_encode($event, JSON_THROW_ON_ERROR);
+    $signature = StripeSignature::header($payload, $secret ?? (string) config('ulvi.stripe.webhook_secret'), $timestamp);
+
+    return test()->call('POST', '/api/webhooks/stripe', server: [
+        'HTTP_STRIPE_SIGNATURE' => $signature,
+        'CONTENT_TYPE' => 'application/json',
+        'HTTP_ACCEPT' => 'application/json',
+    ], content: $payload);
+}
+
+/**
+ * @param  array<string, mixed>  $object
+ * @return array<string, mixed>
+ */
+function stripeEvent(string $type, array $object, ?string $id = null): array
+{
+    return StripeEvents::make($type, $object, $id);
 }

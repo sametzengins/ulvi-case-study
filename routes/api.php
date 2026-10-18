@@ -4,7 +4,9 @@ use App\Http\Controllers\Api\V1\AuthController;
 use App\Http\Controllers\Api\V1\CharacterController;
 use App\Http\Controllers\Api\V1\ConversationController;
 use App\Http\Controllers\Api\V1\MessageController;
+use App\Http\Controllers\Api\V1\TopUpController;
 use App\Http\Controllers\Api\V1\WalletController;
+use App\Http\Controllers\StripeWebhookController;
 use Illuminate\Support\Facades\Route;
 
 Route::prefix('v1')->group(function () {
@@ -26,5 +28,10 @@ Route::prefix('v1')->group(function () {
 
         Route::get('billing/wallet', [WalletController::class, 'show']);
         Route::get('billing/ledger', [WalletController::class, 'ledger']);
+        Route::get('billing/top-ups', [TopUpController::class, 'index']);
+        Route::post('billing/top-ups/checkout', [TopUpController::class, 'checkout']);
     });
 });
+
+// Stripe proves who it is with the signature, not a token.
+Route::post('webhooks/stripe', StripeWebhookController::class)->name('webhooks.stripe');
