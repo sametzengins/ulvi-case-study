@@ -14,6 +14,11 @@ use Illuminate\Contracts\View\View;
  */
 class DemoController extends Controller
 {
+    public function index(): View
+    {
+        return view('demo.index');
+    }
+
     public function checkout(string $session, PaymentGateway $gateway): View
     {
         return view('demo.checkout', ['session' => $this->session($gateway, $session)]);
