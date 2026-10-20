@@ -10,9 +10,13 @@ use App\Models\Conversation;
 use App\Models\Message;
 use App\Models\User;
 use App\Wallet\TokenWallet;
+use GuzzleHttp\Psr7\Response as Psr7Response;
 use Illuminate\Foundation\Testing\RefreshDatabase;
 use Illuminate\Support\Str;
 use Illuminate\Testing\TestResponse;
+use League\OpenAPIValidation\PSR7\Exception\ValidationFailed;
+use League\OpenAPIValidation\PSR7\OperationAddress;
+use League\OpenAPIValidation\PSR7\ValidatorBuilder;
 use Tests\TestCase;
 
 pest()->extend(TestCase::class)
@@ -20,6 +24,41 @@ pest()->extend(TestCase::class)
     ->in('Feature');
 
 pest()->extend(TestCase::class)->in('Concurrency');
+
+/*
+|--------------------------------------------------------------------------
+| Expectations
+|--------------------------------------------------------------------------
+*/
+
+/**
+ * The response must be exactly what openapi.yaml promises for this operation:
+ * status code, headers and body schema.
+ */
+expect()->extend('toMatchContract', function (string $method, string $path) {
+    static $validator = null;
+    $validator ??= (new ValidatorBuilder)->fromYamlFile(base_path('openapi.yaml'))->getResponseValidator();
+
+    /** @var TestResponse $response */
+    $response = $this->value;
+    $psrResponse = new Psr7Response($response->getStatusCode(), $response->headers->all(), (string) $response->getContent());
+
+    try {
+        $validator->validate(new OperationAddress($path, strtolower($method)), $psrResponse);
+    } catch (ValidationFailed $e) {
+        $reasons = [];
+
+        for ($error = $e; $error !== null; $error = $error->getPrevious()) {
+            $reasons[] = $error->getMessage();
+        }
+
+        test()->fail("{$method} {$path} ({$response->getStatusCode()}) does not match openapi.yaml:\n  ".implode("\n  ", $reasons)."\n\nBody: ".$response->getContent());
+    }
+
+    expect(true)->toBeTrue();
+
+    return $this;
+});
 
 /*
 |--------------------------------------------------------------------------

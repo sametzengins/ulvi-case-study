@@ -9,6 +9,8 @@ use App\Http\Controllers\Api\V1\WalletController;
 use App\Http\Controllers\StripeWebhookController;
 use Illuminate\Support\Facades\Route;
 
+// Every route here is in openapi.yaml. ContractTest fails when the two differ.
+
 Route::prefix('v1')->group(function () {
     Route::middleware('throttle:auth')->group(function () {
         Route::post('auth/register', [AuthController::class, 'register']);

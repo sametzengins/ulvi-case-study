@@ -1,0 +1,555 @@
+openapi: 3.0.3
+info:
+  title: Ulvi Case Study API
+  version: 1.0.0
+  description: |
+    The backend behind a character-based AI app: identity, the conversation API, the token
+    wallet and top-ups.
+
+    ## Conventions
+
+    - **Versioning.** Everything is under `/api/v1`. Additive changes (a new field, a new
+      endpoint, a new error code) ship in v1. Anything that would break an existing client
+      ships as v2.
+    - **Auth.** `Authorization: Bearer <token>` from `/auth/register` or `/auth/login`.
+    - **Errors.** Every error is `{"message", "code", "errors"?, "meta"?}`. Clients branch on
+      `code`. The `message` is for people.
+    - **Idempotency.** Sending a message can be retried safely: reuse its `client_message_id`.
+      A replayed request returns the original result with `Idempotent-Replayed: true`.
+    - **Pagination.** Lists use cursors: follow `meta.next_cursor` until it is `null`.
+
+    ## Real-time events
+
+    Sending a message answers `202` immediately. The reply arrives on the private channel
+    `conversation.{id}` (Laravel Reverb, Pusher protocol). Authorize the channel with
+    `POST /api/broadcasting/auth` using the same bearer token.
+
+    | event | payload | when |
+    |---|---|---|
+    | `agent.responded` | `{message: Message}` | the reply was saved. Its `reply_to_id` is your message |
+    | `agent.failed` | `{message: Message}` | the reply could not be produced. The reserved tokens were refunded |
+
+    Delivery is at-least-once. De-duplicate by `message.id`.
+
+servers:
+  - url: http://localhost:8000
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+  - name: Characters
+  - name: Conversations
+  - name: Wallet
+  - name: Webhooks
+
+paths:
+  /api/v1/auth/register:
+    post:
+      tags: [Auth]
+      summary: Create an account
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name, email, password]
+              properties:
+                name: { type: string, maxLength: 100 }
+                email: { type: string, format: email }
+                password: { type: string, minLength: 8 }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResult' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      summary: Get a token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [email, password]
+              properties:
+                email: { type: string, format: email }
+                password: { type: string }
+                device_name: { type: string }
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResult' }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/me:
+    get:
+      tags: [Auth]
+      summary: The signed-in user
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/User' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/v1/characters:
+    get:
+      tags: [Characters]
+      summary: All characters
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items: { $ref: '#/components/schemas/Character' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/v1/conversations:
+    post:
+      tags: [Conversations]
+      summary: Start a conversation with a character
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [character]
+              properties:
+                character: { type: string, example: sera }
+      responses:
+        '201':
+          description: Created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Conversation' }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /api/v1/conversations/{conversation}/messages:
+    get:
+      tags: [Conversations]
+      summary: Message history, newest first
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/CursorPage'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+    post:
+      tags: [Conversations]
+      summary: Send a message
+      description: |
+        Stores the message, reserves the most its reply can cost and queues it. The reply
+        arrives as `agent.responded` on `conversation.{id}`, and the unused part of the
+        reservation is refunded.
+
+        Retrying with the same `client_message_id` returns the original message
+        (`Idempotent-Replayed: true`) and does not reserve tokens again.
+
+        Errors: `quota_exhausted` (402), `rate_limited` (429).
+      parameters:
+        - $ref: '#/components/parameters/ConversationId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [message, client_message_id]
+              properties:
+                message: { type: string, maxLength: 4000 }
+                client_message_id:
+                  type: string
+                  format: uuid
+                  description: Generated once per message by the client and reused on every retry of it.
+      responses:
+        '202':
+          description: Accepted. The reply is on its way
+          headers:
+            Idempotent-Replayed:
+              $ref: '#/components/headers/IdempotentReplayed'
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Message' }
+        '401': { $ref: '#/components/responses/Error' }
+        '402': { $ref: '#/components/responses/Error' }
+        '404': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+        '429': { $ref: '#/components/responses/RateLimited' }
+
+  /api/v1/billing/wallet:
+    get:
+      tags: [Wallet]
+      summary: Token balance
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data: { $ref: '#/components/schemas/Wallet' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/v1/billing/ledger:
+    get:
+      tags: [Wallet]
+      summary: Every token movement, newest first
+      parameters:
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/CursorPage'
+                  - type: object
+                    properties:
+                      data:
+                        type: array
+                        items: { $ref: '#/components/schemas/LedgerEntry' }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/v1/billing/top-ups:
+    get:
+      tags: [Wallet]
+      summary: Token packs
+      responses:
+        '200':
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: array
+                    items:
+                      type: object
+                      additionalProperties: false
+                      required: [key, name, tokens, price]
+                      properties:
+                        key: { type: string, example: boost_s }
+                        name: { type: string, example: Boost S }
+                        tokens: { type: integer }
+                        price:
+                          type: object
+                          additionalProperties: false
+                          required: [amount, currency]
+                          properties:
+                            amount: { type: integer, description: In kuruş }
+                            currency: { type: string, enum: [try] }
+        '401': { $ref: '#/components/responses/Error' }
+
+  /api/v1/billing/top-ups/checkout:
+    post:
+      tags: [Wallet]
+      summary: Start a top-up checkout
+      description: |
+        Creates a pending purchase, then a checkout session. Tokens are credited when the
+        payment webhook arrives, not when this returns.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pack]
+              properties:
+                pack: { type: string, enum: [boost_s, boost_m, boost_l] }
+      responses:
+        '201':
+          description: Checkout session created
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [data]
+                properties:
+                  data:
+                    type: object
+                    additionalProperties: false
+                    required: [purchase_id, checkout_url, session_id]
+                    properties:
+                      purchase_id: { type: integer }
+                      checkout_url: { type: string }
+                      session_id: { type: string }
+        '401': { $ref: '#/components/responses/Error' }
+        '422': { $ref: '#/components/responses/ValidationFailed' }
+
+  /api/webhooks/stripe:
+    post:
+      tags: [Webhooks]
+      summary: Stripe event endpoint
+      description: |
+        Authenticated by the `Stripe-Signature` header (HMAC-SHA256 of the raw body, 300 second
+        window), not by a token. Every valid delivery is answered 200, including duplicates.
+        processing happens on the queue.
+      security: []
+      parameters:
+        - name: Stripe-Signature
+          in: header
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { type: object }
+      responses:
+        '200':
+          description: Stored (or already stored)
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                required: [received, duplicate]
+                properties:
+                  received: { type: boolean }
+                  duplicate: { type: boolean }
+        '400': { $ref: '#/components/responses/Error' }
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+
+  parameters:
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      schema: { type: string }
+      description: The `meta.next_cursor` of the previous page.
+    ConversationId:
+      name: conversation
+      in: path
+      required: true
+      schema: { type: integer }
+
+  headers:
+    IdempotentReplayed:
+      description: '`true` when this response replays an earlier request with the same idempotency key.'
+      schema: { type: string, enum: ['true', 'false'] }
+
+  responses:
+    Error:
+      description: Error
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+    ValidationFailed:
+      description: The request is not valid
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/ValidationError' }
+    RateLimited:
+      description: Too many requests (`rate_limited`)
+      content:
+        application/json:
+          schema: { $ref: '#/components/schemas/Error' }
+
+  schemas:
+    Error:
+      type: object
+      additionalProperties: false
+      required: [message, code]
+      properties:
+        message: { type: string, description: For people. Clients branch on `code` }
+        code:
+          type: string
+          enum:
+            - validation_failed
+            - unauthenticated
+            - invalid_credentials
+            - rate_limited
+            - not_found
+            - http_error
+            - quota_exhausted
+            - invalid_signature
+        meta:
+          type: object
+          description: 'Code-specific details, e.g. `{"needed": 4200, "available": 900}` for quota_exhausted'
+          additionalProperties: true
+
+    ValidationError:
+      type: object
+      additionalProperties: false
+      required: [message, code, errors]
+      properties:
+        message: { type: string }
+        code: { type: string, enum: [validation_failed] }
+        errors:
+          type: object
+          additionalProperties:
+            type: array
+            items: { type: string }
+
+    CursorPage:
+      type: object
+      required: [data, links, meta]
+      properties:
+        data: { type: array, items: {} }
+        links:
+          type: object
+          additionalProperties: false
+          required: [first, last, prev, next]
+          properties:
+            first: { type: string, nullable: true }
+            last: { type: string, nullable: true }
+            prev: { type: string, nullable: true }
+            next: { type: string, nullable: true }
+        meta:
+          type: object
+          additionalProperties: false
+          required: [path, per_page, next_cursor, prev_cursor]
+          properties:
+            path: { type: string }
+            per_page: { type: integer }
+            next_cursor: { type: string, nullable: true }
+            prev_cursor: { type: string, nullable: true }
+
+    User:
+      type: object
+      additionalProperties: false
+      required: [id, name, email, created_at]
+      properties:
+        id: { type: integer }
+        name: { type: string }
+        email: { type: string, format: email }
+        created_at: { type: string, format: date-time }
+
+    AuthResult:
+      type: object
+      additionalProperties: false
+      required: [data]
+      properties:
+        data:
+          type: object
+          additionalProperties: false
+          required: [token, user]
+          properties:
+            token: { type: string }
+            user: { $ref: '#/components/schemas/User' }
+
+    Character:
+      type: object
+      additionalProperties: false
+      required: [slug, name, tagline]
+      properties:
+        slug: { type: string, example: sera }
+        name: { type: string, example: Sera }
+        tagline: { type: string }
+
+    Conversation:
+      type: object
+      additionalProperties: false
+      required: [id, character, created_at]
+      properties:
+        id: { type: integer }
+        character:
+          type: object
+          additionalProperties: false
+          required: [slug, name]
+          properties:
+            slug: { type: string }
+            name: { type: string }
+        created_at: { type: string, format: date-time }
+
+    Message:
+      type: object
+      additionalProperties: false
+      required: [id, conversation_id, role, content, status, client_message_id, reply_to_id, input_tokens, output_tokens, failure_reason, created_at]
+      properties:
+        id: { type: integer }
+        conversation_id: { type: integer }
+        role: { type: string, enum: [user, assistant] }
+        content: { type: string }
+        status: { type: string, enum: [queued, processing, completed, failed] }
+        client_message_id: { type: string, format: uuid, nullable: true }
+        reply_to_id: { type: integer, nullable: true, description: 'On an assistant message: the user message it answers' }
+        input_tokens: { type: integer, nullable: true }
+        output_tokens: { type: integer, nullable: true }
+        failure_reason: { type: string, nullable: true }
+        created_at: { type: string, format: date-time }
+
+    Wallet:
+      type: object
+      additionalProperties: false
+      required: [balance]
+      properties:
+        balance: { type: integer }
+
+    LedgerEntry:
+      type: object
+      additionalProperties: false
+      required: [id, type, amount, balance_before, balance_after, idempotency_key, created_at]
+      properties:
+        id: { type: integer }
+        type: { type: string, enum: [signup_bonus, message_hold, message_refund, top_up, adjustment] }
+        amount: { type: integer, description: Negative for spending }
+        balance_before: { type: integer }
+        balance_after: { type: integer }
+        idempotency_key: { type: string }
+        created_at: { type: string, format: date-time }
